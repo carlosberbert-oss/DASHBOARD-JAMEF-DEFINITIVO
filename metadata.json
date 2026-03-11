@@ -1,0 +1,5 @@
+{
+  "name": "Transport Luuna Dashboard",
+  "description": "Dashboard de performance de entregas com mapas e gráficos em tempo real.",
+  "requestFramePermissions": ["geolocation"]
+}
