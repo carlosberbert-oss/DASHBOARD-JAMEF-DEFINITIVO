@@ -16,6 +16,7 @@ const TransportDashboard = () => {
     const [pendingFilters, setPendingFilters] = useState({ ufs: [], weeks: [], statusJamef: [], deliveryStatus: '', search: '' });
     const [appliedFilters, setAppliedFilters] = useState({ ufs: [], weeks: [], statusJamef: [], deliveryStatus: '', search: '' });
     const [loading, setLoading] = useState(true);
+    const [geocoding, setGeocoding] = useState(false);
     const [viewMode, setViewMode] = useState<'uf' | 'cep'>('uf');
     const [cepCoords, setCepCoords] = useState<{ [key: string]: [number, number] }>({});
 
@@ -48,7 +49,7 @@ const TransportDashboard = () => {
         if (filteredData.length > 0) {
             updateDashboard();
         }
-    }, [filteredData]);
+    }, [filteredData, viewMode, cepCoords]);
 
     const fetchData = async () => {
         setLoading(true);
@@ -67,6 +68,7 @@ const TransportDashboard = () => {
 
     const processData = (rawData) => {
         const processed = rawData.map((item, index) => {
+            if (index === 0) console.log('Exemplo de item bruto da API:', item);
             const dataPrevisao = item['DATA PREVISAO'] ? new Date(item['DATA PREVISAO']) : null;
             const dataRealizacao = item['DATA REALIZACAO'] ? new Date(item['DATA REALIZACAO']) : null;
             
@@ -75,19 +77,26 @@ const TransportDashboard = () => {
                 status = dataRealizacao.getTime() <= dataPrevisao.getTime() ? 'On time' : 'Late time';
             }
 
-            let rawCep = (item['CEP'] || item['cep'] || '').toString().replace(/\D/g, '');
+            // Find keys regardless of case or spaces
+            const cepKey = Object.keys(item).find(k => k.trim().toUpperCase() === 'CEP') || 'CEP';
+            const ufKey = Object.keys(item).find(k => k.trim().toUpperCase() === 'UF ENTREGA' || k.trim().toUpperCase() === 'UF') || 'UF ENTREGA';
+            const nfKey = Object.keys(item).find(k => k.trim().toUpperCase() === 'NOTA FISCAL' || k.trim().toUpperCase() === 'NF') || 'NOTA FISCAL';
+            const jamefKey = Object.keys(item).find(k => k.trim().toUpperCase() === 'STATUS JAMEF') || 'STATUS JAMEF';
+            const semanaKey = Object.keys(item).find(k => k.trim().toUpperCase() === 'SEMANA') || 'SEMANA';
+
+            let rawCep = (item[cepKey] || '').toString().replace(/\D/g, '');
             if (rawCep.length === 7) rawCep = '0' + rawCep;
 
             return {
                 id: index,
-                ufEntrega: item['UF ENTREGA'] || '',
+                ufEntrega: item[ufKey] || '',
                 cep: rawCep,
                 dataPrevisao: item['DATA PREVISAO'],
                 dataRealizacao: item['DATA REALIZACAO'],
-                statusJamef: item['STATUS JAMEF'] || '',
-                notaFiscal: item['NOTA FISCAL']?.toString() || '',
+                statusJamef: item[jamefKey] || '',
+                notaFiscal: item[nfKey]?.toString() || '',
                 status,
-                semana: Number(item['SEMANA'] || 0),
+                semana: Number(item[semanaKey] || 0),
                 tempoDias: dataPrevisao && dataRealizacao ? Math.round((dataRealizacao.getTime() - dataPrevisao.getTime()) / (1000 * 60 * 60 * 24)) : null
             };
         });
@@ -263,11 +272,17 @@ const TransportDashboard = () => {
 
     const geocodeCEPs = async (data) => {
         const uniqueCEPs = [...new Set(data.map(d => d.cep))].filter(Boolean) as string[];
-        const newCoords = { ...cepCoords };
-        let updated = false;
+        const cepsToFetch = uniqueCEPs.filter(cep => !cepCoords[cep]);
+        
+        if (cepsToFetch.length === 0) return;
 
-        for (const cep of uniqueCEPs) {
-            if (!newCoords[cep]) {
+        setGeocoding(true);
+        const newCoords = { ...cepCoords };
+        const batchSize = 5; // Process 5 at a time to avoid rate limits
+        
+        for (let i = 0; i < cepsToFetch.length; i += batchSize) {
+            const batch = cepsToFetch.slice(i, i + batchSize);
+            await Promise.all(batch.map(async (cep) => {
                 try {
                     const cleanCep = cep.replace(/\D/g, '');
                     const res = await fetch(`https://cep.awesomeapi.com.br/json/${cleanCep}`);
@@ -275,18 +290,17 @@ const TransportDashboard = () => {
                         const json = await res.json();
                         if (json.lat && json.lng) {
                             newCoords[cep] = [parseFloat(json.lat), parseFloat(json.lng)];
-                            updated = true;
                         }
                     }
                 } catch (e) {
                     console.error(`Error geocoding CEP ${cep}:`, e);
                 }
-            }
+            }));
+            
+            // Update state periodically to show progress
+            setCepCoords({ ...newCoords });
         }
-
-        if (updated) {
-            setCepCoords(newCoords);
-        }
+        setGeocoding(false);
     };
 
     useEffect(() => {
@@ -321,9 +335,14 @@ const TransportDashboard = () => {
             const counts: { [key: string]: number } = {};
             filteredData.forEach((d: any) => { if (d.ufEntrega) counts[d.ufEntrega] = (counts[d.ufEntrega] || 0) + 1; });
 
+            const bounds = L.latLngBounds([]);
+            let hasMarkers = false;
+
             Object.entries(stateCoords).forEach(([uf, coords]) => {
                 const count = counts[uf] || 0;
                 if (count > 0) {
+                    hasMarkers = true;
+                    bounds.extend(coords as L.LatLngExpression);
                     let color = '#3498db';
                     if (count > 5) color = '#2ecc71';
                     if (count > 15) color = '#f39c12';
@@ -360,33 +379,79 @@ const TransportDashboard = () => {
                         .bindTooltip(`<strong>${uf}</strong>: ${count} entregas`);
                 }
             });
+
+            if (hasMarkers && mapInstance.current) {
+                mapInstance.current.fitBounds(bounds, { padding: [50, 50] });
+            }
         } else {
-            // CEP View
+            // CEP View - Pins
+            const bounds = L.latLngBounds([]);
+            let hasMarkers = false;
+
             filteredData.forEach((d: any) => {
                 if (d.cep && cepCoords[d.cep]) {
                     const coords = cepCoords[d.cep];
+                    hasMarkers = true;
+                    bounds.extend(coords as L.LatLngExpression);
+
                     let color = '#3498db';
                     if (d.status === 'On time') color = '#2ecc71';
                     if (d.status === 'Late time') color = '#e74c3c';
                     if (d.status === 'Pendente') color = '#f39c12';
 
-                    L.circleMarker(coords as L.LatLngExpression, {
-                        radius: 6,
-                        fillColor: color,
-                        color: '#fff',
-                        weight: 1,
-                        opacity: 1,
-                        fillOpacity: 0.8
-                    })
+                    const pinIcon = L.divIcon({
+                        className: 'custom-pin',
+                        html: `
+                            <div style="
+                                position: relative;
+                                width: 24px;
+                                height: 24px;
+                            ">
+                                <div style="
+                                    width: 24px;
+                                    height: 24px;
+                                    background: ${color};
+                                    border-radius: 50% 50% 50% 0;
+                                    transform: rotate(-45deg);
+                                    border: 2px solid white;
+                                    box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+                                    display: flex;
+                                    align-items: center;
+                                    justify-content: center;
+                                ">
+                                    <div style="
+                                        width: 8px;
+                                        height: 8px;
+                                        background: white;
+                                        border-radius: 50%;
+                                        transform: rotate(45deg);
+                                    "></div>
+                                </div>
+                            </div>
+                        `,
+                        iconSize: [24, 24],
+                        iconAnchor: [12, 24],
+                        popupAnchor: [0, -24]
+                    });
+
+                    L.marker(coords as L.LatLngExpression, { icon: pinIcon })
                     .addTo(mapInstance.current!)
                     .bindPopup(`
-                        <strong>NF: ${d.notaFiscal}</strong><br/>
-                        CEP: ${d.cep}<br/>
-                        Status: ${d.status}<br/>
-                        UF: ${d.ufEntrega}
+                        <div style="font-family: sans-serif; padding: 5px;">
+                            <strong style="color: #2c3e50; font-size: 14px;">NF: ${d.notaFiscal}</strong><br/>
+                            <div style="margin-top: 5px; color: #7f8c8d; font-size: 12px;">
+                                <strong>CEP:</strong> ${d.cep}<br/>
+                                <strong>Status:</strong> <span style="color: ${color}; font-weight: bold;">${d.status}</span><br/>
+                                <strong>UF:</strong> ${d.ufEntrega}
+                            </div>
+                        </div>
                     `);
                 }
             });
+
+            if (hasMarkers && mapInstance.current) {
+                mapInstance.current.fitBounds(bounds, { padding: [50, 50], maxZoom: 12 });
+            }
         }
     };
 
@@ -502,7 +567,7 @@ const TransportDashboard = () => {
                     <div className="chart-row">
                         <div className="chart-card large">
                             <div className="chart-header">
-                                <h3><MapIcon size={18} /> Mapa de Entregas</h3>
+                                <h3><MapIcon size={18} /> Mapa de Entregas {geocoding && <span className="geocoding-loader"><RefreshCw size={14} className="spin" /> Localizando CEPs...</span>}</h3>
                                 <div className="map-controls">
                                     <div className="view-toggle">
                                         <button 

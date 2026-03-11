@@ -346,7 +346,26 @@
 .legend-color.warning { background: #f39c12; }
 .legend-color.high { background: #e74c3c; }
 
-.custom-map-marker {
+.geocoding-loader {
+    font-size: 0.75rem;
+    color: var(--secondary);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: 15px;
+    font-weight: normal;
+}
+
+.spin {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.custom-pin {
     background: none !important;
     border: none !important;
 }
