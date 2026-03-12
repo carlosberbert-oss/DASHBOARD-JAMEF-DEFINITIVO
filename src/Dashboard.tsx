@@ -7,6 +7,8 @@ import { Truck, Filter, MapPin, Calendar, Clock, Database, ChartLine, CheckCircl
 import './Dashboard.css';
 
 Chart.register(...registerables, ChartDataLabels);
+Chart.defaults.font.family = "'Inter', sans-serif";
+Chart.defaults.color = '#64748b';
 
 const TransportDashboard = () => {
     const [allData, setAllData] = useState([]);
@@ -84,8 +86,19 @@ const TransportDashboard = () => {
             const jamefKey = Object.keys(item).find(k => k.trim().toUpperCase() === 'STATUS JAMEF') || 'STATUS JAMEF';
             const semanaKey = Object.keys(item).find(k => k.trim().toUpperCase() === 'SEMANA') || 'SEMANA';
 
-            let rawCep = (item[cepKey] || '').toString().replace(/\D/g, '');
-            if (rawCep.length === 7) rawCep = '0' + rawCep;
+            let rawValue = (item[cepKey] || '').toString().trim();
+            // Se vier como número do Excel/Sheets (ex: 12402500.0), remove o .0
+            if (rawValue.endsWith('.0')) rawValue = rawValue.slice(0, -2);
+            
+            let rawCep = rawValue.replace(/\D/g, '');
+            
+            // Regra: se tem 7 dígitos, adiciona o 0. Se tem 8, mantém.
+            if (rawCep.length === 7) {
+                rawCep = '0' + rawCep;
+            } else if (rawCep.length > 8) {
+                // Se por acaso tiver mais de 8 (ex: 124025000), pegamos os 8 primeiros
+                rawCep = rawCep.substring(0, 8);
+            }
 
             return {
                 id: index,
@@ -214,55 +227,331 @@ const TransportDashboard = () => {
             });
         }
 
+        // Total Stacked Bar
+        const totalCtx = (document.getElementById('totalStackedBarChart') as HTMLCanvasElement)?.getContext('2d');
+        if (totalCtx) {
+            if (charts.current.totalBar) charts.current.totalBar.destroy();
+            charts.current.totalBar = new Chart(totalCtx, {
+                type: 'bar',
+                data: {
+                    labels: ['Total Geral'],
+                    datasets: [
+                        {
+                            label: 'On Time',
+                            data: [onTime],
+                            backgroundColor: '#2ecc71',
+                            datalabels: {
+                                color: '#fff',
+                                font: { weight: 'bold', size: 12 },
+                                formatter: (value) => value > 0 ? value : ''
+                            }
+                        },
+                        {
+                            label: 'Late Time',
+                            data: [lateTime],
+                            backgroundColor: '#e74c3c',
+                            datalabels: {
+                                color: '#fff',
+                                font: { weight: 'bold', size: 12 },
+                                formatter: (value) => value > 0 ? value : ''
+                            }
+                        },
+                        {
+                            label: 'Total',
+                            data: [onTime + lateTime],
+                            type: 'line',
+                            showLine: false,
+                            pointRadius: 0,
+                            datalabels: {
+                                color: '#2c3e50',
+                                font: { weight: 'bold', size: 14 },
+                                anchor: 'end',
+                                align: 'top',
+                                offset: 5,
+                                formatter: (value) => value
+                            }
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    layout: {
+                        padding: { top: 25 }
+                    },
+                    plugins: {
+                        legend: { 
+                            position: 'bottom',
+                            labels: {
+                                filter: (item) => item.text !== 'Total'
+                            }
+                        },
+                        datalabels: { display: true }
+                    },
+                    scales: {
+                        x: { stacked: true, display: true },
+                        y: { stacked: true, beginAtZero: true }
+                    }
+                }
+            });
+        }
+
         // Deliveries by UF
         const ufCtx = (document.getElementById('ufBarChart') as HTMLCanvasElement)?.getContext('2d');
         if (ufCtx) {
-            const stateCounts: { [key: string]: number } = {};
+            const stateStats: { [key: string]: { onTime: number, lateTime: number, total: number } } = {};
             filteredData.forEach((d: any) => { 
-                if (d.ufEntrega) stateCounts[d.ufEntrega] = (stateCounts[d.ufEntrega] || 0) + 1; 
+                if (d.ufEntrega) {
+                    if (!stateStats[d.ufEntrega]) stateStats[d.ufEntrega] = { onTime: 0, lateTime: 0, total: 0 };
+                    stateStats[d.ufEntrega].total += 1;
+                    if (d.status === 'On time') stateStats[d.ufEntrega].onTime += 1;
+                    else if (d.status === 'Late time') stateStats[d.ufEntrega].lateTime += 1;
+                }
             });
-            const sorted = Object.entries(stateCounts).sort((a, b) => b[1] - a[1]);
+            const sorted = Object.entries(stateStats).sort((a, b) => b[1].total - a[1].total);
+            const maxTotal = Math.max(...sorted.map(s => s[1].total));
+            const threshold = maxTotal * 0.07; // 7% of max height
 
             if (charts.current.ufBar) charts.current.ufBar.destroy();
             charts.current.ufBar = new Chart(ufCtx, {
                 type: 'bar',
                 data: {
                     labels: sorted.map(s => s[0]),
-                    datasets: [{ 
-                        label: 'Total de Entregas', 
-                        data: sorted.map(s => s[1]), 
-                        backgroundColor: '#3498db',
-                        borderRadius: 5,
-                        datalabels: {
-                            color: '#fff',
-                            anchor: 'center',
-                            align: 'center',
-                            font: {
-                                weight: 'bold',
-                                size: 11
-                            },
-                            formatter: (value) => value > 0 ? value : ''
+                    datasets: [
+                        { 
+                            label: 'On Time', 
+                            data: sorted.map(s => s[1].onTime), 
+                            backgroundColor: '#2ecc71',
+                            borderRadius: 0,
+                            datalabels: {
+                                color: '#fff',
+                                font: { weight: 'bold', size: 10 },
+                                anchor: 'center',
+                                align: 'center',
+                                formatter: (value) => value > 0 ? value : ''
+                            }
+                        },
+                        { 
+                            label: 'Late Time', 
+                            data: sorted.map(s => s[1].lateTime), 
+                            backgroundColor: '#e74c3c',
+                            borderRadius: 0,
+                            datalabels: {
+                                color: '#fff',
+                                font: { weight: 'bold', size: 10 },
+                                anchor: 'center',
+                                align: 'center',
+                                formatter: (value) => value > 0 ? value : ''
+                            }
+                        },
+                        {
+                            label: 'Total',
+                            data: sorted.map(s => s[1].total),
+                            type: 'line',
+                            hidden: false,
+                            showLine: false,
+                            pointRadius: 0,
+                            datalabels: {
+                                color: '#2c3e50',
+                                font: { weight: 'bold', size: 11 },
+                                anchor: 'end',
+                                align: 'top',
+                                offset: 2,
+                                formatter: (value) => value
+                            }
                         }
-                    }]
+                    ]
                 },
                 options: { 
                     responsive: true, 
                     maintainAspectRatio: false,
+                    layout: {
+                        padding: {
+                            top: 20 // Space for labels above the bar
+                        }
+                    },
                     plugins: {
-                        legend: { display: false },
+                        legend: { 
+                            display: true, 
+                            position: 'top',
+                            labels: {
+                                filter: (item) => item.text !== 'Total'
+                            }
+                        },
                         datalabels: {
-                            display: true
+                            display: true,
+                            clip: false // Don't clip labels that go outside the bar
                         }
                     },
                     scales: {
                         y: { 
+                            stacked: true,
                             beginAtZero: true, 
                             grid: { display: true, color: '#f0f0f0' },
                             ticks: { font: { size: 10 } }
                         },
                         x: { 
+                            stacked: true,
                             grid: { display: false },
                             ticks: { font: { size: 10, weight: 'bold' } }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Deliveries by Region
+        const regionCtx = (document.getElementById('regionBarChart') as HTMLCanvasElement)?.getContext('2d');
+        if (regionCtx) {
+            const regionMapping: { [key: string]: string } = {
+                'AC': 'Norte', 'AM': 'Norte', 'AP': 'Norte', 'PA': 'Norte', 'RO': 'Norte', 'RR': 'Norte', 'TO': 'Norte',
+                'AL': 'Nordeste', 'BA': 'Nordeste', 'CE': 'Nordeste', 'MA': 'Nordeste', 'PB': 'Nordeste', 'PE': 'Nordeste', 'PI': 'Nordeste', 'RN': 'Nordeste', 'SE': 'Nordeste',
+                'DF': 'Centro-Oeste', 'GO': 'Centro-Oeste', 'MT': 'Centro-Oeste', 'MS': 'Centro-Oeste',
+                'ES': 'Sudeste', 'MG': 'Sudeste', 'RJ': 'Sudeste', 'SP': 'Sudeste',
+                'PR': 'Sul', 'RS': 'Sul', 'SC': 'Sul'
+            };
+
+            const regionStats: { [key: string]: { onTime: number, lateTime: number, total: number } } = {
+                'Norte': { onTime: 0, lateTime: 0, total: 0 },
+                'Nordeste': { onTime: 0, lateTime: 0, total: 0 },
+                'Centro-Oeste': { onTime: 0, lateTime: 0, total: 0 },
+                'Sudeste': { onTime: 0, lateTime: 0, total: 0 },
+                'Sul': { onTime: 0, lateTime: 0, total: 0 }
+            };
+
+            filteredData.forEach((d: any) => {
+                const region = regionMapping[d.ufEntrega];
+                if (region) {
+                    regionStats[region].total += 1;
+                    if (d.status === 'On time') regionStats[region].onTime += 1;
+                    else if (d.status === 'Late time') regionStats[region].lateTime += 1;
+                }
+            });
+
+            const regionData = Object.entries(regionStats).sort((a, b) => b[1].total - a[1].total);
+
+            if (charts.current.regionBar) charts.current.regionBar.destroy();
+            charts.current.regionBar = new Chart(regionCtx, {
+                type: 'bar',
+                data: {
+                    labels: regionData.map(r => r[0]),
+                    datasets: [
+                        {
+                            label: 'On Time',
+                            data: regionData.map(r => r[1].onTime),
+                            backgroundColor: '#2ecc71',
+                            datalabels: {
+                                color: '#fff',
+                                font: { weight: 'bold', size: 12 },
+                                anchor: 'center',
+                                align: 'center',
+                                formatter: (value) => value > 0 ? value : ''
+                            }
+                        },
+                        {
+                            label: 'Late Time',
+                            data: regionData.map(r => r[1].lateTime),
+                            backgroundColor: '#e74c3c',
+                            datalabels: {
+                                color: '#fff',
+                                font: { weight: 'bold', size: 12 },
+                                anchor: 'center',
+                                align: 'center',
+                                formatter: (value) => value > 0 ? value : ''
+                            }
+                        },
+                        {
+                            label: 'Total',
+                            data: regionData.map(r => r[1].total),
+                            type: 'line',
+                            showLine: false,
+                            pointRadius: 0,
+                            datalabels: {
+                                color: '#2c3e50',
+                                font: { weight: 'bold', size: 13 },
+                                anchor: 'end',
+                                align: 'top',
+                                offset: 5,
+                                formatter: (value) => value
+                            }
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    layout: { padding: { top: 25 } },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top',
+                            labels: { filter: (item) => item.text !== 'Total' }
+                        },
+                        datalabels: { display: true, clip: false }
+                    },
+                    scales: {
+                        y: { stacked: true, beginAtZero: true },
+                        x: { stacked: true }
+                    }
+                }
+            });
+        }
+
+        // Average Lead Time Difference by UF
+        const avgLeadTimeCtx = (document.getElementById('avgLeadTimeChart') as HTMLCanvasElement)?.getContext('2d');
+        if (avgLeadTimeCtx) {
+            const ufDiffs: { [key: string]: { totalDiff: number, count: number } } = {};
+            
+            filteredData.forEach((d: any) => {
+                if (d.ufEntrega && d.tempoDias !== null) {
+                    if (!ufDiffs[d.ufEntrega]) ufDiffs[d.ufEntrega] = { totalDiff: 0, count: 0 };
+                    ufDiffs[d.ufEntrega].totalDiff += d.tempoDias;
+                    ufDiffs[d.ufEntrega].count += 1;
+                }
+            });
+
+            const avgData = Object.entries(ufDiffs)
+                .map(([uf, stats]) => ({
+                    uf,
+                    avg: Number((stats.totalDiff / stats.count).toFixed(1))
+                }))
+                .sort((a, b) => b.avg - a.avg);
+
+            if (charts.current.avgLeadTime) charts.current.avgLeadTime.destroy();
+            charts.current.avgLeadTime = new Chart(avgLeadTimeCtx, {
+                type: 'bar',
+                data: {
+                    labels: avgData.map(d => d.uf),
+                    datasets: [{
+                        label: 'Média de Dias (Atraso > 0, Antecipado < 0)',
+                        data: avgData.map(d => d.avg),
+                        backgroundColor: avgData.map(d => d.avg > 0 ? '#e74c3c' : '#2ecc71'),
+                        datalabels: {
+                            color: '#2c3e50',
+                            font: { weight: 'bold', size: 10 },
+                            anchor: (context) => {
+                                const value = context.dataset.data[context.dataIndex] as number;
+                                return value >= 0 ? 'end' : 'start';
+                            },
+                            align: (context) => {
+                                const value = context.dataset.data[context.dataIndex] as number;
+                                return value >= 0 ? 'top' : 'bottom';
+                            },
+                            formatter: (value) => value > 0 ? `+${value}` : value
+                        }
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        datalabels: { display: true }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: { display: true, text: 'Dias' }
                         }
                     }
                 }
@@ -499,9 +788,8 @@ const TransportDashboard = () => {
                     </div>
                 </div>
                 <div className="data-info">
-                    <h4><Database size={16} /> Informações</h4>
-                    <p>API: Google Sheets</p>
-                    <p>Total: {allData.length}</p>
+                    <p><span>API:</span> <span>Google Sheets</span></p>
+                    <p><span>Total:</span> <span>{allData.length}</span></p>
                 </div>
             </div>
 
@@ -545,20 +833,32 @@ const TransportDashboard = () => {
                 <section className="kpi-section">
                     <div className="kpi-grid">
                         <div className="kpi-card">
-                            <div className="kpi-icon" style={{ background: '#3498db' }}><Truck /></div>
-                            <div className="kpi-content"><h3>Total</h3><p>{stats.total}</p></div>
+                            <div className="kpi-icon" style={{ background: 'var(--primary)' }}><Truck /></div>
+                            <div className="kpi-info">
+                                <h4>Total</h4>
+                                <p>{stats.total}</p>
+                            </div>
                         </div>
                         <div className="kpi-card">
-                            <div className="kpi-icon" style={{ background: '#2ecc71' }}><CheckCircle /></div>
-                            <div className="kpi-content"><h3>On Time</h3><p>{stats.onTimeRate}%</p></div>
+                            <div className="kpi-icon" style={{ background: 'var(--success)' }}><CheckCircle /></div>
+                            <div className="kpi-info">
+                                <h4>On Time</h4>
+                                <p>{stats.onTimeRate}%</p>
+                            </div>
                         </div>
                         <div className="kpi-card">
-                            <div className="kpi-icon" style={{ background: '#e74c3c' }}><AlertTriangle /></div>
-                            <div className="kpi-content"><h3>Atrasos</h3><p>{stats.lateTime}</p></div>
+                            <div className="kpi-icon" style={{ background: 'var(--danger)' }}><AlertTriangle /></div>
+                            <div className="kpi-info">
+                                <h4>Atrasos</h4>
+                                <p>{stats.lateTime}</p>
+                            </div>
                         </div>
                         <div className="kpi-card">
-                            <div className="kpi-icon" style={{ background: '#f39c12' }}><MapIcon /></div>
-                            <div className="kpi-content"><h3>Estados</h3><p>{stats.estadosCount}</p></div>
+                            <div className="kpi-icon" style={{ background: 'var(--warning)' }}><MapIcon /></div>
+                            <div className="kpi-info">
+                                <h4>Estados</h4>
+                                <p>{stats.estadosCount}</p>
+                            </div>
                         </div>
                     </div>
                 </section>
@@ -583,12 +883,7 @@ const TransportDashboard = () => {
                                             CEP
                                         </button>
                                     </div>
-                                    <div className="map-legend">
-                                        <span><div className="legend-color low"></div> 1-5</span>
-                                        <span><div className="legend-color medium"></div> 6-15</span>
-                                        <span><div className="legend-color warning"></div> 16-30</span>
-                                        <span><div className="legend-color high"></div> 31+</span>
-                                    </div>
+
                                 </div>
                             </div>
                             <div id="brazilMap" ref={mapRef}></div>
@@ -597,11 +892,29 @@ const TransportDashboard = () => {
                             <div className="chart-header"><h3>Status</h3></div>
                             <div className="chart-container"><canvas id="statusPieChart"></canvas></div>
                         </div>
+                        <div className="chart-card">
+                            <div className="chart-header"><h3>Total On Time vs Late Time</h3></div>
+                            <div className="chart-container"><canvas id="totalStackedBarChart"></canvas></div>
+                        </div>
                     </div>
                     <div className="chart-row">
                         <div className="chart-card full-width">
                             <div className="chart-header"><h3><Truck size={18} /> Entregas por UF</h3></div>
                             <div className="chart-container"><canvas id="ufBarChart"></canvas></div>
+                        </div>
+                    </div>
+
+                    <div className="chart-row">
+                        <div className="chart-card full-width">
+                            <div className="chart-header"><h3><Truck size={18} /> Entregas por Região</h3></div>
+                            <div className="chart-container"><canvas id="regionBarChart"></canvas></div>
+                        </div>
+                    </div>
+
+                    <div className="chart-row">
+                        <div className="chart-card full-width">
+                            <div className="chart-header"><h3><Clock size={18} /> Média de Dias de Diferença (Realizado vs Previsto) por UF</h3></div>
+                            <div className="chart-container"><canvas id="avgLeadTimeChart"></canvas></div>
                         </div>
                     </div>
 
@@ -648,9 +961,13 @@ const TransportDashboard = () => {
                             </table>
                         </div>
                         <div className="pagination">
-                            <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1}><ChevronLeft /></button>
-                            <span>Página {currentPage} de {totalPages}</span>
-                            <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages}><ChevronRight /></button>
+                            <div className="pagination-info">
+                                Página {currentPage} de {totalPages}
+                            </div>
+                            <div className="pagination-controls">
+                                <button className="btn-icon" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1}><ChevronLeft size={18} /></button>
+                                <button className="btn-icon" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages}><ChevronRight size={18} /></button>
+                            </div>
                         </div>
                     </div>
                 </section>
