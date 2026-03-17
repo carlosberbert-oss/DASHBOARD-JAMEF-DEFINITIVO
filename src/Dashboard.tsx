@@ -19,6 +19,7 @@ const TransportDashboard = () => {
     const [appliedFilters, setAppliedFilters] = useState({ ufs: [], weeks: [], statusJamef: [], deliveryStatus: '', search: '' });
     const [loading, setLoading] = useState(true);
     const [geocoding, setGeocoding] = useState(false);
+    const [pendingGeocoding, setPendingGeocoding] = useState(0);
     const [viewMode, setViewMode] = useState<'uf' | 'cep'>('uf');
     const [cepCoords, setCepCoords] = useState<{ [key: string]: [number, number] }>({});
 
@@ -566,30 +567,71 @@ const TransportDashboard = () => {
         if (cepsToFetch.length === 0) return;
 
         setGeocoding(true);
+        setPendingGeocoding(cepsToFetch.length);
         const newCoords = { ...cepCoords };
-        const batchSize = 5; // Process 5 at a time to avoid rate limits
         
+        // Process in larger batches for speed
+        const batchSize = 5;
         for (let i = 0; i < cepsToFetch.length; i += batchSize) {
             const batch = cepsToFetch.slice(i, i + batchSize);
+            
             await Promise.all(batch.map(async (cep) => {
                 try {
-                    const cleanCep = cep.replace(/\D/g, '');
-                    const res = await fetch(`https://cep.awesomeapi.com.br/json/${cleanCep}`);
-                    if (res.ok) {
-                        const json = await res.json();
-                        if (json.lat && json.lng) {
-                            newCoords[cep] = [parseFloat(json.lat), parseFloat(json.lng)];
+                    const cleanCep = cep.replace(/\D/g, '').padStart(8, '0');
+                    if (cleanCep.length !== 8) return;
+
+                    let found = false;
+
+                    // Try BrasilAPI first
+                    try {
+                        const res = await fetch(`https://brasilapi.com.br/api/cep/v2/${cleanCep}`, {
+                            mode: 'cors',
+                            headers: { 'Accept': 'application/json' }
+                        });
+                        if (res.ok) {
+                            const json = await res.json();
+                            if (json.location?.coordinates) {
+                                const lat = parseFloat(json.location.coordinates.latitude);
+                                const lng = parseFloat(json.location.coordinates.longitude);
+                                if (!isNaN(lat) && !isNaN(lng)) {
+                                    newCoords[cep] = [lat, lng];
+                                    found = true;
+                                }
+                            }
                         }
+                    } catch (e) { /* Silent fail */ }
+
+                    if (!found) {
+                        // Try AwesomeAPI as fallback
+                        try {
+                            const res = await fetch(`https://cep.awesomeapi.com.br/json/${cleanCep}`, { mode: 'cors' });
+                            if (res.ok) {
+                                const json = await res.json();
+                                const lat = parseFloat(json.lat);
+                                const lng = parseFloat(json.lng);
+                                if (!isNaN(lat) && !isNaN(lng)) {
+                                    newCoords[cep] = [lat, lng];
+                                    found = true;
+                                }
+                            }
+                        } catch (e) { /* Silent fail */ }
                     }
                 } catch (e) {
                     console.error(`Error geocoding CEP ${cep}:`, e);
                 }
             }));
-            
-            // Update state periodically to show progress
+
+            // Update state after each batch to show progress
             setCepCoords({ ...newCoords });
+            setPendingGeocoding(Math.max(0, cepsToFetch.length - (i + batchSize)));
+            
+            // Minimal delay to respect rate limits but stay fast
+            if (i + batchSize < cepsToFetch.length) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
         }
         setGeocoding(false);
+        setPendingGeocoding(0);
     };
 
     useEffect(() => {
@@ -680,6 +722,8 @@ const TransportDashboard = () => {
             filteredData.forEach((d: any) => {
                 if (d.cep && cepCoords[d.cep]) {
                     const coords = cepCoords[d.cep];
+                    if (isNaN(coords[0]) || isNaN(coords[1])) return;
+                    
                     hasMarkers = true;
                     bounds.extend(coords as L.LatLngExpression);
 
@@ -826,6 +870,12 @@ const TransportDashboard = () => {
                         </div>
                     </div>
                     <div className="header-controls">
+                        {geocoding && (
+                            <div className="flex items-center gap-2 text-sm text-blue-600 bg-blue-50 px-3 py-1 rounded-full border border-blue-100 animate-pulse">
+                                <RefreshCw className="animate-spin" size={14} />
+                                <span>Geocodificando {pendingGeocoding} CEPs...</span>
+                            </div>
+                        )}
                         <button className="btn-refresh" onClick={fetchData}><RefreshCw size={16} /> Atualizar</button>
                     </div>
                 </header>
@@ -867,7 +917,7 @@ const TransportDashboard = () => {
                     <div className="chart-row">
                         <div className="chart-card large">
                             <div className="chart-header">
-                                <h3><MapIcon size={18} /> Mapa de Entregas {geocoding && <span className="geocoding-loader"><RefreshCw size={14} className="spin" /> Localizando CEPs...</span>}</h3>
+                                <h3><MapIcon size={18} /> Mapa de Entregas {geocoding && <span className="text-xs font-normal text-blue-500 ml-2 inline-flex items-center gap-1"><RefreshCw size={12} className="animate-spin" /> {pendingGeocoding} CEPs restantes...</span>}</h3>
                                 <div className="map-controls">
                                     <div className="view-toggle">
                                         <button 
