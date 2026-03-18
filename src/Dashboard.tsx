@@ -21,7 +21,20 @@ const TransportDashboard = () => {
     const [geocoding, setGeocoding] = useState(false);
     const [pendingGeocoding, setPendingGeocoding] = useState(0);
     const [viewMode, setViewMode] = useState<'uf' | 'cep'>('uf');
-    const [cepCoords, setCepCoords] = useState<{ [key: string]: [number, number] }>({});
+    const [cepCoords, setCepCoords] = useState<{ [key: string]: [number, number] }>(() => {
+        try {
+            const saved = localStorage.getItem('transport_cep_coords');
+            return saved ? JSON.parse(saved) : {};
+        } catch (e) {
+            return {};
+        }
+    });
+
+    useEffect(() => {
+        if (Object.keys(cepCoords).length > 0) {
+            localStorage.setItem('transport_cep_coords', JSON.stringify(cepCoords));
+        }
+    }, [cepCoords]);
 
     const mapRef = useRef<HTMLDivElement>(null);
     const mapInstance = useRef<L.Map | null>(null);
@@ -75,6 +88,9 @@ const TransportDashboard = () => {
             const dataPrevisao = item['DATA PREVISAO'] ? new Date(item['DATA PREVISAO']) : null;
             const dataRealizacao = item['DATA REALIZACAO'] ? new Date(item['DATA REALIZACAO']) : null;
             
+            const mes = dataPrevisao ? dataPrevisao.toLocaleString('pt-BR', { month: 'short', year: '2-digit' }) : 'N/A';
+            const mesOrder = dataPrevisao ? dataPrevisao.getFullYear() * 100 + dataPrevisao.getMonth() : 0;
+
             let status = item['STATUS'] || 'Pendente';
             if (dataPrevisao && dataRealizacao) {
                 status = dataRealizacao.getTime() <= dataPrevisao.getTime() ? 'On time' : 'Late time';
@@ -111,6 +127,8 @@ const TransportDashboard = () => {
                 notaFiscal: item[nfKey]?.toString() || '',
                 status,
                 semana: Number(item[semanaKey] || 0),
+                mes,
+                mesOrder,
                 tempoDias: dataPrevisao && dataRealizacao ? Math.round((dataRealizacao.getTime() - dataPrevisao.getTime()) / (1000 * 60 * 60 * 24)) : null
             };
         });
@@ -120,18 +138,27 @@ const TransportDashboard = () => {
     const createDemoData = () => {
         const estados = ['SP', 'RJ', 'MG', 'RS', 'PR', 'SC', 'BA', 'PE', 'CE', 'GO'];
         const ceps = ['01001000', '20010000', '30110000', '90010000', '80010000', '88010000', '40010000', '50010000', '60010000', '74010000'];
-        const demo = Array.from({ length: 100 }, (_, i) => ({
-            id: i,
-            ufEntrega: estados[Math.floor(Math.random() * estados.length)],
-            cep: ceps[Math.floor(Math.random() * ceps.length)],
-            dataPrevisao: new Date().toISOString(),
-            dataRealizacao: new Date().toISOString(),
-            statusJamef: 'Entrega Realizada',
-            notaFiscal: `NF${10000 + i}`,
-            status: Math.random() > 0.2 ? 'On time' : 'Late time',
-            semana: Math.floor(Math.random() * 52) + 1,
-            tempoDias: Math.floor(Math.random() * 5) - 2
-        }));
+        const demo = Array.from({ length: 100 }, (_, i) => {
+            const date = new Date();
+            date.setMonth(date.getMonth() - Math.floor(Math.random() * 6));
+            const mes = date.toLocaleString('pt-BR', { month: 'short', year: '2-digit' });
+            const mesOrder = date.getFullYear() * 100 + date.getMonth();
+            
+            return {
+                id: i,
+                ufEntrega: estados[Math.floor(Math.random() * estados.length)],
+                cep: ceps[Math.floor(Math.random() * ceps.length)],
+                dataPrevisao: date.toISOString(),
+                dataRealizacao: date.toISOString(),
+                statusJamef: ['Entrega Realizada', 'Em Transito', 'Coleta Realizada', 'Em Processamento'][Math.floor(Math.random() * 4)],
+                notaFiscal: `NF${10000 + i}`,
+                status: Math.random() > 0.2 ? 'On time' : 'Late time',
+                semana: Math.floor(Math.random() * 52) + 1,
+                mes,
+                mesOrder,
+                tempoDias: Math.floor(Math.random() * 5) - 2
+            };
+        });
         setAllData(demo);
     };
 
@@ -191,7 +218,127 @@ const TransportDashboard = () => {
         });
 
         renderCharts(onTime, lateTime, pendente);
+        renderOTDEvolution();
+        renderJamefRanking();
         renderMap();
+    };
+
+    const renderOTDEvolution = () => {
+        const ctx = (document.getElementById('otdEvolutionChart') as HTMLCanvasElement)?.getContext('2d');
+        if (!ctx) return;
+
+        const monthsData: { [key: string]: { total: number, onTime: number, order: number } } = {};
+        filteredData.forEach((d: any) => {
+            if (d.mes === 'N/A') return;
+            if (!monthsData[d.mes]) {
+                monthsData[d.mes] = { total: 0, onTime: 0, order: d.mesOrder };
+            }
+            monthsData[d.mes].total++;
+            if (d.status === 'On time') monthsData[d.mes].onTime++;
+        });
+
+        const sortedMonths = Object.keys(monthsData).sort((a, b) => monthsData[a].order - monthsData[b].order);
+        const labels = sortedMonths;
+        const otdValues = sortedMonths.map(m => Math.round((monthsData[m].onTime / monthsData[m].total) * 100));
+        const targetValues = labels.map(() => 95);
+
+        if (charts.current.otdEvolution) charts.current.otdEvolution.destroy();
+        charts.current.otdEvolution = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [
+                    {
+                        label: 'OTD %',
+                        data: otdValues,
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 5,
+                        pointBackgroundColor: '#3498db',
+                        datalabels: {
+                            align: 'top',
+                            formatter: (v) => `${v}%`,
+                            color: '#2c3e50',
+                            font: { weight: 'bold' }
+                        }
+                    },
+                    {
+                        label: 'Objetivo (95%)',
+                        data: targetValues,
+                        borderColor: '#e74c3c',
+                        borderDash: [5, 5],
+                        pointRadius: 0,
+                        fill: false,
+                        datalabels: { display: false }
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        min: Math.min(...otdValues, 90) - 5,
+                        max: 100,
+                        ticks: { callback: (v) => `${v}%` }
+                    }
+                },
+                plugins: {
+                    legend: { position: 'bottom' }
+                }
+            }
+        });
+    };
+
+    const renderJamefRanking = () => {
+        const ctx = (document.getElementById('jamefRankingChart') as HTMLCanvasElement)?.getContext('2d');
+        if (!ctx) return;
+
+        const counts: { [key: string]: number } = {};
+        filteredData.forEach((d: any) => {
+            if (d.statusJamef) counts[d.statusJamef] = (counts[d.statusJamef] || 0) + 1;
+        });
+
+        const sorted = Object.entries(counts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10);
+
+        const labels = sorted.map(s => s[0]);
+        const values = sorted.map(s => s[1]);
+
+        if (charts.current.jamefRanking) charts.current.jamefRanking.destroy();
+        charts.current.jamefRanking = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels,
+                datasets: [{
+                    label: 'Quantidade',
+                    data: values,
+                    backgroundColor: '#34495e',
+                    borderRadius: 5,
+                    datalabels: {
+                        anchor: 'end',
+                        align: 'right',
+                        color: '#2c3e50',
+                        font: { weight: 'bold' }
+                    }
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false }
+                },
+                scales: {
+                    x: { beginAtZero: true }
+                }
+            }
+        });
     };
 
     const renderCharts = (onTime, lateTime, pendente) => {
@@ -570,8 +717,8 @@ const TransportDashboard = () => {
         setPendingGeocoding(cepsToFetch.length);
         const newCoords = { ...cepCoords };
         
-        // Process in larger batches for speed
-        const batchSize = 5;
+        // Process in even larger batches for maximum speed
+        const batchSize = 25;
         for (let i = 0; i < cepsToFetch.length; i += batchSize) {
             const batch = cepsToFetch.slice(i, i + batchSize);
             
@@ -582,7 +729,7 @@ const TransportDashboard = () => {
 
                     let found = false;
 
-                    // Try BrasilAPI first
+                    // Try BrasilAPI first (usually faster and more reliable)
                     try {
                         const res = await fetch(`https://brasilapi.com.br/api/cep/v2/${cleanCep}`, {
                             mode: 'cors',
@@ -627,7 +774,7 @@ const TransportDashboard = () => {
             
             // Minimal delay to respect rate limits but stay fast
             if (i + batchSize < cepsToFetch.length) {
-                await new Promise(resolve => setTimeout(resolve, 100));
+                await new Promise(resolve => setTimeout(resolve, 30));
             }
         }
         setGeocoding(false);
@@ -877,6 +1024,13 @@ const TransportDashboard = () => {
                             </div>
                         )}
                         <button className="btn-refresh" onClick={fetchData}><RefreshCw size={16} /> Atualizar</button>
+                        <button className="btn-refresh" style={{ background: '#94a3b8' }} onClick={() => {
+                            if (window.confirm('Deseja realmente limpar o cache de coordenadas? Todos os CEPs precisarão ser geocodificados novamente.')) {
+                                localStorage.removeItem('transport_cep_coords');
+                                setCepCoords({});
+                                fetchData();
+                            }
+                        }}>Limpar Cache ({Object.keys(cepCoords).length})</button>
                     </div>
                 </header>
 
@@ -947,6 +1101,17 @@ const TransportDashboard = () => {
                             <div className="chart-container"><canvas id="totalStackedBarChart"></canvas></div>
                         </div>
                     </div>
+                    <div className="chart-row">
+                        <div className="chart-card half-width">
+                            <div className="chart-header"><h3><ChartLine size={18} /> Evolução Mensal OTD (Meta 95%)</h3></div>
+                            <div className="chart-container"><canvas id="otdEvolutionChart"></canvas></div>
+                        </div>
+                        <div className="chart-card half-width">
+                            <div className="chart-header"><h3><Truck size={18} /> Ranking Status JAMEF (Top 10)</h3></div>
+                            <div className="chart-container"><canvas id="jamefRankingChart"></canvas></div>
+                        </div>
+                    </div>
+
                     <div className="chart-row">
                         <div className="chart-card full-width">
                             <div className="chart-header"><h3><Truck size={18} /> Entregas por UF</h3></div>

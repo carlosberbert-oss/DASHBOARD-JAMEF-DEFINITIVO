@@ -333,6 +333,17 @@
     grid-column: 1 / -1;
 }
 
+.chart-card.half-width {
+    flex: 1;
+    min-width: 400px;
+}
+
+@media (max-width: 900px) {
+    .chart-card.half-width {
+        min-width: 100%;
+    }
+}
+
 .chart-card.full-width .chart-container {
     height: 400px;
 }
